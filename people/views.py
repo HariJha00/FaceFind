@@ -1,3 +1,5 @@
+import os
+
 from pipes import Template
 from django.shortcuts import render
 
@@ -9,6 +11,7 @@ from django.urls import reverse_lazy
 from people.models import MissingPerson, ReportedPerson
 from .forms import *
 from azure.cognitiveservices.vision.face import FaceClient
+from azure.cognitiveservices.vision.face.models import APIErrorException  # Add this line
 from msrest.authentication import CognitiveServicesCredentials
 from django.contrib.auth.mixins import LoginRequiredMixin
 
@@ -72,25 +75,49 @@ class MisssingPersonUpdateView(LoginRequiredMixin, UpdateView):
     template_name = 'people/create_update_form.html'
     success_url = reverse_lazy ('list_missing_person')
 
-# function to generate face_id using Azure Face API
+# Function to generate face_id using Azure Face API
 def generate_face_id(image_path):
     face_client = FaceClient(config['ENDPOINT'], CognitiveServicesCredentials(config['KEY']))
-    response_detected_face = face_client.face.detect_with_stream(
-        image=open(image_path, 'rb'),
-        detection_model='detection_03',
-        recognition_model='recognition_04',
-        )
-    return response_detected_face
+    
+    # Check if the image path exists
+    if not os.path.exists(image_path):
+        print(f"Image file not found at path: {image_path}")
+        return None
 
-# function to find a match for the reported person from the list of missing people using Azure Face API
+    try:
+        with open(image_path, 'rb') as image:
+            response_detected_face = face_client.face.detect_with_stream(
+                image=image,
+                detection_model='detection_03',
+                recognition_model='recognition_04'
+            )
+
+        if response_detected_face and len(response_detected_face) > 0:
+            return response_detected_face
+        else:
+            print("No faces detected in the image.")
+            return None
+
+    except APIErrorException as e:
+        # Handle APIErrorException
+        if hasattr(e, 'error'):
+            error_message = e.error if hasattr(e.error, 'message') else str(e.error)
+            print(f"API Error during face ID generation: {error_message}")
+        else:
+            print(f"API Error during face ID generation: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return None 
+
+# Function to find a match for the reported person from the list of missing people using Azure Face API
 def find_match(reported_face_id, missing_face_ids):
     face_client = FaceClient(config['ENDPOINT'], CognitiveServicesCredentials(config['KEY']))
     matched_faces = face_client.face.find_similar(
         face_id=reported_face_id,
         face_ids=missing_face_ids
-        )
-    return matched_faces
-
+    )
+    return matched_faces 
 # view to verify a missing person (if background check is done)
 class MisssingPersonVerifyView(LoginRequiredMixin, UpdateView):
     login_url = reverse_lazy('index')
@@ -101,28 +128,34 @@ class MisssingPersonVerifyView(LoginRequiredMixin, UpdateView):
     success_url = reverse_lazy ('list_missing_person')
 
     def post(self, request, **kwargs):
-        print ("Catching Update Function")
-            
+        print("Catching Update Function")
+        
         form = self.form_class(request.POST)
         if form.is_valid():
             if form.cleaned_data['is_verified']:
                 self.object = self.get_object()
-                print ("image URL is", self.object.photo.url)
-                print ("image Path is", self.object.photo.path)
+                print("image URL is", self.object.photo.url)
+                print("image Path is", self.object.photo.path)
                 
-                print("face ID is",self.object.face_id)
+                print("face ID is", self.object.face_id)
 
                 # if the person is verified and does not already have a face id, we generate one
                 if not self.object.face_id:
-                    print ("Calling Face ID Generation")
+                    print("Calling Face ID Generation")
 
                     # generating face id
-                    response_detected_face=generate_face_id(self.object.photo.path)
-                    print ("Detected Face ID is",response_detected_face[0].face_id)
+                    response_detected_face = generate_face_id(self.object.photo.path)
 
-                    # saving the generated face id to database
-                    self.object.face_id = response_detected_face[0].face_id
-                    self.object.save()
+                    # Check if response_detected_face is valid before accessing
+                    if response_detected_face is not None and len(response_detected_face) > 0:
+                        print("Detected Face ID is", response_detected_face[0].face_id)
+
+                        # saving the generated face id to database
+                        self.object.face_id = response_detected_face[0].face_id
+                        self.object.save()
+                    else:
+                        print("No face detected or an error occurred during face ID generation.")
+                        # You may want to handle this case (e.g., return an error response)
         return super().post(request, **kwargs)
 
 # view to delete a missing person
